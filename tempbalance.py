@@ -5,7 +5,7 @@ import math
 import pandas as pd
 import numpy as np
 from operator import itemgetter
-
+from sampling import *
 
 
 class Tempbalance(object):
@@ -26,7 +26,12 @@ class Tempbalance(object):
                     lr_max_ratio=1.5,
                     batchnorm=True,
                     batchnorm_type='name',
-                    layernorm=False
+                    layernorm=False,
+                    use_sliding_window=False,
+                    num_row_samples=100,  # Required for sliding window
+                    Q_ratio=2.0,  # Required for sliding window
+                    step_size=10,  # Sliding window step size for variable ops
+                    sampling_ops_per_dim=None,  # For fixed number of operations
                     ):
         """init function
         Args:
@@ -46,6 +51,11 @@ class Tempbalance(object):
             batchnorm (bool, ):          whether adjust batch norm learning rate using TB. Defaults to True.
             batchnorm_type (str, ):      how to set learning rate for batchnorm layers
             layernorm (bool, ):          whether adjust layer norm learning rate using TB. Defaults to True.
+            use_sliding_window (bool, ): whether use sliding window for ESD sampling. Defaults to False.
+            num_row_samples (int, ):     number of rows to sample in sliding window. Defaults to 100.
+            Q_ratio (float, ):           ratio of sampled columns to rows in sliding window. Defaults to 2.0.
+            step_size (int, ):           step size for sliding window in variable ops mode. Defaults to 10.
+            sampling_ops_per_dim (int, ): number of sampling operations for fixed ops mode. Defaults to None.
         """
         self.net = net
         self.EVALS_THRESH = EVALS_THRESH
@@ -63,6 +73,11 @@ class Tempbalance(object):
         self.lr_max_ratio = lr_max_ratio
         self.batchnorm = batchnorm
         self.layernorm = layernorm
+        self.use_sliding_window = use_sliding_window
+        self.num_row_samples = num_row_samples
+        self.Q_ratio = Q_ratio
+        self.step_size = step_size
+        self.sampling_ops_per_dim = sampling_ops_per_dim
         self.bn_to_conv = {}
         self.ln_to_linear = {}
         # print('EVALS_THRESH',  self.EVALS_THRESH, type(self.EVALS_THRESH) )
@@ -216,8 +231,8 @@ class Tempbalance(object):
                 param_group['lr'] = opt_params_groups[index]
             else:
                 param_group['lr'] = untuned_lr
-                
-    def net_esd_estimator(
+    
+    def tempbal_esd_estimator(
             self,
             verbose=False):
         """evaluate the ESD of the conv nets
@@ -324,8 +339,165 @@ class Tempbalance(object):
                 results['eigs_num'].append(len(eigs))
         
         return results
+            
+    def net_esd_estimator(
+        self,
+        fix_fingers='xmin_mid',
+        verbose=False
+    ):
+        """Estimator for Empirical Spectral Density (ESD) and Alpha parameter.
     
+        Args:
+            net (nn.Module): Model to evaluate.
+            EVALS_THRESH (float, optional): Threshold to filter near-zero eigenvalues. Defaults to 0.00001.
+            bins (int, optional): Number of bins for histogram. Defaults to 100.
+            fix_fingers (str, optional): 'xmin_peak' or 'xmin_mid'. Method to select xmin.
+            xmin_pos (int, optional): Position in eigenvalue spectrum to choose xmin. Defaults to 2.
+            conv_norm (float, optional): Normalization for convolutional layers. Defaults to 0.5.
+            filter_zeros (bool, optional): Whether to filter zero eigenvalues. Defaults to False.
+            use_sliding_window (bool, optional): Whether to use sliding window sampling. Defaults to False.
+            num_row_samples (int, optional): Number of rows to sample in sliding window.
+            Q_ratio (float, optional): Ratio of sampled columns to rows in sliding window.
+            step_size (int, optional): Step size for sliding window in variable ops mode.
+            sampling_ops_per_dim (int, optional): Number of sampling operations for fixed ops mode.
     
+        Returns:
+            dict: Results containing spectral norm, alpha values, and other metrics.
+        """
+        
+        net = self.net
+        EVALS_THRESH = self.EVALS_THRESH
+        conv_norm = self.conv_norm
+        bins = self.bins
+        use_sliding_window = self.use_sliding_window
+        num_row_samples = self.num_row_samples
+        Q_ratio = self.Q_ratio
+        step_size = self.step_size
+        sampling_ops_per_dim = self.sampling_ops_per_dim
+
+        if not use_sliding_window:
+            results = self.tempbal_esd_estimator(verbose=verbose)
+            return results
+
+        results = {
+            'alpha': [],
+            'spectral_norm': [],
+            'D': [],
+            'longname': [],
+            'eigs': [],
+            'norm': [],
+            'alphahat': [],
+            'eigs_num': []
+        }
+        print("======================================")
+        print(f"fix_fingers: {fix_fingers}, xmin_pos: {self.xmin_pos}, conv_norm: {conv_norm}, filter_zeros: {self.filter_zeros}")
+        print(f"use_sliding_window: {use_sliding_window}, num_row_samples: {num_row_samples}, Q_ratio: {Q_ratio}, step_size: {step_size}, sampling_ops_per_dim: {sampling_ops_per_dim}")
+        print("======================================")
+    
+        device = next(net.parameters()).device  # type: ignore
+    
+        for name, m in net.named_modules():  # type: ignore
+            if isinstance(m, nn.Conv2d) or isinstance(m, nn.Linear):
+                matrix = m.weight.data.clone().to(device)
+                matrix = matrix.float()
+
+                # Sliding window option for sampling ESD
+                if use_sliding_window:
+                    if isinstance(m, nn.Conv2d):
+                        # Flatten the Conv2d weight tensor to 2D
+                        matrix = matrix.view(matrix.size(0), -1) * math.sqrt(conv_norm)
+                    if sampling_ops_per_dim is not None:
+                        print(f"Shape of matrix for {name}: {matrix.shape}")
+                        if matrix.dim() != 2:
+                            raise ValueError(f"Expected a 2D matrix, got {matrix.dim()} dimensions for {name}.")
+                        eigs = fixed_number_of_sampling_ops(
+                            matrix, 
+                            num_row_samples=num_row_samples, 
+                            Q_ratio=Q_ratio, 
+                            num_sampling_ops_per_dimension=sampling_ops_per_dim, 
+                        )
+                    else:
+                        eigs = matrix_size_dependent_number_of_sampling_ops(
+                            matrix, 
+                            num_row_samples=num_row_samples, 
+                            Q_ratio=Q_ratio, 
+                            step_size=step_size,
+                        )
+                else:
+                    if isinstance(m, nn.Conv2d):
+                        matrix = torch.flatten(matrix, start_dim=2) * math.sqrt(conv_norm)
+                        matrix = matrix.transpose(1, 2).transpose(0, 1)
+                    matrix = matrix.float()
+                    # Regular full matrix ESD computation
+                    eigs = torch.square(torch.linalg.svdvals(matrix).flatten())
+                    eigs = torch.sort(eigs).values
+                
+                if not isinstance(eigs, torch.Tensor):
+                    eigs = torch.tensor(eigs, device=device)
+                spectral_norm = eigs[-1].item()
+                fnorm = torch.sum(eigs).item()
+    
+                # Filtering based on EVALS_THRESH
+                nz_eigs = eigs[eigs > EVALS_THRESH] if self.filter_zeros else eigs
+                if len(nz_eigs) == 0:
+                    nz_eigs = eigs
+                N = len(nz_eigs)
+                log_nz_eigs = torch.log(nz_eigs)
+    
+                # Proceed with alpha and D calculations
+                if fix_fingers == 'xmin_mid':
+                    i = N // self.xmin_pos
+                    xmin = nz_eigs[i]
+                    n = float(N - i)
+                    seq = torch.arange(n, device=device)
+                    final_alpha = 1 + n / (torch.sum(log_nz_eigs[i:]) - n * log_nz_eigs[i])
+                    final_D = torch.max(torch.abs(1 - (nz_eigs[i:] / xmin) ** (-final_alpha + 1) - seq / n))
+                else:
+                    alphas = torch.zeros(N-1, device=device)
+                    Ds = torch.ones(N-1, device=device)
+                    if fix_fingers == 'xmin_peak':
+                        hist_nz_eigs = torch.log10(nz_eigs)
+                        min_e, max_e = hist_nz_eigs.min(), hist_nz_eigs.max()
+                        counts = torch.histc(hist_nz_eigs, bins, min=min_e, max=max_e) # type: ignore
+                        boundaries = torch.linspace(min_e, max_e, bins + 1) # type: ignore
+                        ih = torch.argmax(counts)
+                        xmin2 = 10 ** boundaries[ih]
+                        xmin_min = torch.log10(0.95 * xmin2)
+                        xmin_max = 1.5 * xmin2
+                    
+                    for i, xmin in enumerate(nz_eigs[:-1]):
+                        if fix_fingers == 'xmin_peak':
+                            if xmin < xmin_min:
+                                continue
+                            if xmin > xmin_max:
+                                break
+                        n = float(N - i)
+                        seq = torch.arange(n, device=device)
+                        alpha = 1 + n / (torch.sum(log_nz_eigs[i:]) - n * log_nz_eigs[i])
+                        alphas[i] = alpha
+                        if alpha > 1:
+                            Ds[i] = torch.max(torch.abs(1 - (nz_eigs[i:] / xmin) ** (-alpha + 1) - seq / n))
+                    
+                    min_D_index = torch.argmin(Ds)
+                    final_alpha = alphas[min_D_index]
+                    final_D = Ds[min_D_index]
+    
+                # Convert to item() for storing results
+                final_alpha = final_alpha.item()
+                final_D = final_D.item()
+                final_alphahat = final_alpha * math.log10(spectral_norm)
+    
+                results['spectral_norm'].append(spectral_norm)
+                results['alphahat'].append(final_alphahat)
+                results['norm'].append(fnorm)
+                results['alpha'].append(final_alpha)
+                results['D'].append(final_D)
+                results['longname'].append(name)
+                results['eigs'].append(nz_eigs.detach().cpu().numpy())
+                results['eigs_num'].append(len(nz_eigs))
+    
+        return results
+ 
     def get_layer_temps(self, assign_func, metric_scores, untuned_lr):
         n = len(metric_scores)
         idx = [i for i in range(n)]

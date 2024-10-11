@@ -25,7 +25,7 @@ from utils import train, test, getNetwork, save_args_to_file
 
 parser = argparse.ArgumentParser(description='PyTorch CIFAR-10 Training')
 parser.add_argument('--lr',             type=float,      default=0.01,                         help='learning_rate')
-parser.add_argument('--net-type',       type=str,        default='wide-resnet',                help='model')
+parser.add_argument('--net-type',       type=str,        default='wide_resnet',                help='model')
 parser.add_argument('--depth',          type=int,        default=28,                           help='depth of model')
 parser.add_argument('--num-epochs',     type=int,        default=200,                          help='number of epochs')
 parser.add_argument('--widen-factor',   type=float,      default=1,                           help='width of model')
@@ -51,7 +51,7 @@ parser.add_argument('--remove-first-layer', default=True,   type=lambda x: (str(
 parser.add_argument('--batchnorm',          default=True,   type=lambda x: (str(x).lower() == 'true'),  help='balancing batch norm layer')
 parser.add_argument('--filter-zeros',       default=False,  type=lambda x: (str(x).lower() == 'true')   )
 parser.add_argument('--esd-metric-for-tb',   type=str,      default='alpha',  help='ww metric')
-parser.add_argument('--assign-func',         type=str,        default='',       help='assignment function for layerwise lr')
+parser.add_argument('--assign-func',         type=str,        default='tb_linear_map',       help='assignment function for layerwise lr')
 parser.add_argument('--lr-min-ratio',        type=float,    default=0.5)
 parser.add_argument('--lr-max-ratio',        type=float,    default=1.5)
 parser.add_argument('--xmin-pos',            type=float,    default=2, help='xmin_index = size of eigs // xmin_pos')
@@ -63,6 +63,14 @@ parser.add_argument('--T-mult',              type=int,      default=2,       hel
 
 # spectral regularization related
 parser.add_argument('--sg',                 type=float, default=0.01, help='spectrum regularization')
+
+#################################### Sliding window related ################################################
+parser.add_argument('--use-sliding-window', default=False, type=lambda x: (str(x).lower() == 'true'), help='use sliding window')
+parser.add_argument('--row-samples',        type=int, default=100, help='number of row samples')
+parser.add_argument('--Q-ratio',            type=float, default=2.0, help='Q ratio')
+parser.add_argument('--step-size',          type=int, default=10, help='step size')
+parser.add_argument('--sampling-ops-per-dim', type=int, default=None, help='sampling ops per dim')
+############################################################################################################
 
 
 args = parser.parse_args()
@@ -210,7 +218,12 @@ if args.use_tb:
                     lr_min_ratio=args.lr_min_ratio,
                     lr_max_ratio=args.lr_max_ratio,
                     batchnorm=args.batchnorm,
-                    batchnorm_type=args.batchnorm_type
+                    batchnorm_type=args.batchnorm_type,
+                    use_sliding_window=args.use_sliding_window,
+                    num_row_samples=args.row_samples,
+                    Q_ratio=args.Q_ratio,
+                    step_size=args.step_size,
+                    sampling_ops_per_dim=args.sampling_ops_per_dim,
                     )
 
     tb_param_group, _ = \

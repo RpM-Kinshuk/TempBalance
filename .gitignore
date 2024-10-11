@@ -1,0 +1,7 @@
+__pycache__/
+cifar10/
+cifar100/
+
+*.pyc
+*.cpython-38.pyc
+*.ckpt
