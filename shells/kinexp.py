@@ -5,7 +5,7 @@ os.environ['MKL_THREADING_LAYER'] = 'gnu'
 
 gpus = list(range(4))
 
-slide_window = True
+slide_window = False
 slide_list = [True, False]
 row_samples = 100
 q_ratio = 2.0
@@ -22,6 +22,7 @@ if not slide_window:
     grid = itertools.product([1], [1])
 
 model = 'resnet'
+depth = 18
 cachedir = "/scratch/kinshuk/cache"
 logger = get_logger('log', 'schedule_subspace.log')
 
@@ -30,9 +31,10 @@ BASH_COMMAND_LIST = []
 
 for q_ratio, sampling_ops in grid:
     
-    save_path = f"/jumbo/yaoqingyang/kinshuk/TempBalance/results/{model}18/{dataset}"
-    additional = f"/slide_{slide_window}/row_{row_samples}/qr_{q_ratio}/ops_{sampling_ops}"
-    save_path += additional
+    save_path = f"/jumbo/yaoqingyang/kinshuk/TempBalance/results/test/{model}{depth}/{dataset}/slide_{slide_window}"
+    additional = f"/row_{row_samples}/qr_{q_ratio}/ops_{sampling_ops}"
+    if slide_window:
+        save_path += additional
     if not os.path.exists(save_path):
         os.makedirs(save_path)
     cmd = (
@@ -42,7 +44,7 @@ for q_ratio, sampling_ops in grid:
         f" --net-type {model}"
         f" --dataset {dataset}"
         f" --lr 0.01"
-        f" --depth 18"
+        f" --depth {depth}"
         f" --num-epochs 200"
         f" --batch-size 512"
         f" --optim-type SGD"
