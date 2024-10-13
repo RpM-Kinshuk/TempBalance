@@ -401,53 +401,38 @@ class Tempbalance(object):
         for name, m in net.named_modules(): # type: ignore
             if isinstance(m, nn.Conv2d) or isinstance(m, nn.Linear):
                 matrix = m.weight.data.clone().to(device)
+                matrix = matrix.float()
+                
+                # Regular Eigen Value Calculation
+                if not use_sliding_window:
+                    results = self.tempbal_esd_estimator(verbose=verbose)
+                    return results
+                    if isinstance(m, nn.Conv2d):
+                        matrix = torch.flatten(matrix, start_dim=2) * math.sqrt(conv_norm)
+                        matrix = matrix.transpose(1, 2).transpose(0, 1)
+                    # Calculate the eigenvalues using SVD
+                    eigs = torch.square(torch.linalg.svdvals(matrix).flatten())
+                
+                # Sliding window option for sampling layers
+                else:
+                    eigs = sampled_eigs(
+                        matrix=matrix, isconv2d=isinstance(m, nn.Conv2d),
+                        conv_norm=conv_norm, num_row_samples=num_row_samples,
+                        Q_ratio=Q_ratio, step_size=step_size,
+                        sampling_ops_per_dim=sampling_ops_per_dim
+                    )
 
-                # Conv2d weight slicing using conv2D_Wmats method from WW
-                if isinstance(m, nn.Conv2d):
-                    # Use the conv2D_Wmats method to slice the Conv2D weight tensor
-                    Wmats, N, M, rf = conv2D_Wmats(matrix, channels=CHANNELS.UNKNOWN)
-                else:  # Linear layers
-                    Wmats = [matrix.float()]
-
-                all_eigs = []
-
-                for W in Wmats:
-                    # Apply sliding window sampling or regular ESD computation
-                    if use_sliding_window:
-                        if sampling_ops_per_dim is not None:
-                            eigs = fixed_number_of_sampling_ops(
-                                W, 
-                                num_row_samples=num_row_samples, 
-                                Q_ratio=Q_ratio, 
-                                num_sampling_ops_per_dimension=sampling_ops_per_dim, 
-                            )
-                        else:
-                            eigs = matrix_size_dependent_number_of_sampling_ops(
-                                W, 
-                                num_row_samples=num_row_samples, 
-                                Q_ratio=Q_ratio, 
-                                step_size=step_size,
-                            )
-                    else:
-                        # Regular ESD: compute eigenvalues of W
-                        eigs = torch.square(torch.linalg.svdvals(W).flatten())
-
-                    if not isinstance(eigs, torch.Tensor):
-                        eigs = torch.tensor(eigs, device=device)
-
-                    all_eigs.append(eigs)
-
-                # Concatenate and sort all eigenvalues from the slices
-                all_eigs = torch.cat(all_eigs)
-                all_eigs = torch.sort(all_eigs).values
-
-                spectral_norm = all_eigs[-1].item()
-                fnorm = torch.sum(all_eigs).item()
+                if not isinstance(eigs, torch.Tensor):
+                    eigs = torch.tensor(eigs, device=device)
+                
+                eigs = torch.sort(eigs).values
+                spectral_norm = eigs[-1].item()
+                fnorm = torch.sum(eigs).item()
 
                 # Filter based on threshold
-                nz_eigs = all_eigs[all_eigs > EVALS_THRESH] if filter_zeros else all_eigs
+                nz_eigs = eigs[eigs > EVALS_THRESH] if filter_zeros else eigs
                 if len(nz_eigs) == 0:
-                    nz_eigs = all_eigs
+                    nz_eigs = eigs
                 N = len(nz_eigs)
                 log_nz_eigs = torch.log(nz_eigs)
 

@@ -1,100 +1,12 @@
 import math
 import torch
-
-########################################################################################################
-# This function applies sliding window sampling matrix method for approximating random matrix ESD (V1) #
-########################################################################################################
-def matrix_size_dependent_number_of_sampling_ops(matrix, num_row_samples, Q_ratio, step_size=10):
-    rows, cols = matrix.shape
-    
-    num_col_samples = int(num_row_samples * Q_ratio)
-    
-    # Determine the number of windows
-    num_row_windows = max(1, (rows - num_row_samples) // step_size + 1)
-    num_col_windows = max(1, (cols - num_col_samples) // step_size + 1)
-    
-    all_eigs = []
-    # print(f"Matrix shape: ({rows}, {cols}) | Number of sliding operations across rows: {num_row_windows} and across columns: {num_col_windows}")
-    
-    for i in range(0, num_row_windows):
-        for j in range(0, num_col_windows):
-            # Extract submatrix
-            row_start = i * step_size
-            col_start = j * step_size
-            submatrix = matrix[row_start:row_start + num_row_samples, 
-                               col_start:col_start + num_col_samples]
-            
-            # Compute singular values
-            s = torch.linalg.svdvals(submatrix)
-            
-            # Compute eigenvalues (squared singular values)
-            eigs = torch.square(s)
-            
-            all_eigs.append(eigs)
-    
-    # Concatenate all eigenvalues
-    all_eigs = torch.cat(all_eigs)
-    
-    # Sort eigenvalues
-    all_eigs, _ = torch.sort(all_eigs, descending=False)
-    
-    # Return eigs as a tensor on the same device
-    return all_eigs
-
-########################################################################################################
-# This function applies sliding window sampling matrix method for approximating random matrix ESD (V2) #
-########################################################################################################
-def fixed_number_of_sampling_ops(matrix, num_row_samples, Q_ratio, num_sampling_ops_per_dimension):
-    rows, cols = matrix.shape
-    
-    num_col_samples = int(num_row_samples * Q_ratio)
-    
-    # Calculate step sizes
-    row_step = max(1, math.floor((rows - num_row_samples) / (num_sampling_ops_per_dimension - 1)))
-    col_step = max(1, math.floor((cols - num_col_samples) / (num_sampling_ops_per_dimension - 1)))
-    
-    # Determine the actual number of windows based on calculated step sizes
-    num_row_windows = min(num_sampling_ops_per_dimension, max(1, (rows - num_row_samples) // row_step + 1))
-    num_col_windows = min(num_sampling_ops_per_dimension, max(1, (cols - num_col_samples) // col_step + 1))
-    
-    all_eigs = []
-    # print(f"Matrix shape: ({rows}, {cols}) | Number of sliding operations across rows: {num_row_windows} and across columns: {num_col_windows}")
-    # print(f"Row step size: {row_step}, Column step size: {col_step}")
-    
-    for i in range(0, num_row_windows):
-        for j in range(0, num_col_windows):
-            # Extract submatrix
-            row_start = min(i * row_step, rows - num_row_samples)
-            col_start = min(j * col_step, cols - num_col_samples)
-            submatrix = matrix[row_start:row_start+num_row_samples, 
-                               col_start:col_start+num_col_samples]
-            
-            # Compute singular values
-            s = torch.linalg.svdvals(submatrix)
-            
-            # Compute eigenvalues (squared singular values)
-            eigs = torch.square(s)
-            
-            all_eigs.append(eigs)
-    
-    # Concatenate all eigenvalues
-    all_eigs = torch.cat(all_eigs)
-    
-    # Sort eigenvalues
-    all_eigs, _ = torch.sort(all_eigs, descending=False)
-    
-    # Return eigs as a tensor on the same device
-    return all_eigs
-
-
-########################################################################################################
-############### Code below handles slicing of Conv2d layers, courtesy of WeightWathcer #################
-########################################################################################################
-
 import logging
 logger = logging.getLogger(__name__)
 UNKNOWN = 'unknown'
 
+########################################################################################################
+############################ This Code handles slicing of Conv2d layers ################################
+########################################################################################################
 class CHANNELS():
     UNKNOWN = UNKNOWN
     FIRST = 'first'
@@ -185,3 +97,162 @@ def conv2D_Wmats(Wtensor, channels=CHANNELS.LAST):
         logger.debug("get_conv2D_Wmats N={} M={} rf= {} channels= {}".format(N, M, rf, channels))
     
         return Wmats, N, M, rf
+
+def matrix_size_dependent_sampling_conv2D(matrix, isconv2d, conv_norm, num_row_samples, Q_ratio, step_size=10):
+    # Assuming matrix is of shape (out_channels, in_channels, kernel_height, kernel_width)
+    out_channels, in_channels, kernel_height, kernel_width = matrix.shape
+    num_col_samples = int(num_row_samples * Q_ratio)
+
+    # Calculate number of sliding windows
+    num_row_windows = max(1, (kernel_height - num_row_samples) // step_size + 1)
+    num_col_windows = max(1, (kernel_width - num_col_samples) // step_size + 1)
+
+    all_eigs = []
+
+    for i in range(num_row_windows):
+        for j in range(num_col_windows):
+            # Extract submatrix
+            row_start = i * step_size
+            col_start = j * step_size
+            submatrix = matrix[:, :, row_start:row_start + num_row_samples, col_start:col_start + num_col_samples]
+
+             # Flatten to (out_channels, in_channels * kernel_height * kernel_width)
+            if isconv2d:
+                submatrix = submatrix.flatten(start_dim=1) * math.sqrt(conv_norm)
+            eigs = torch.square(torch.linalg.svdvals(submatrix))
+            all_eigs.append(eigs)
+
+    all_eigs = torch.cat(all_eigs)
+    all_eigs, _ = torch.sort(all_eigs, descending=False)
+
+    return all_eigs
+
+def fixed_sampling_conv2D(matrix, isconv2d, conv_norm, num_row_samples, Q_ratio, sampling_ops_per_dim):
+    # Assuming matrix is of shape (out_channels, in_channels, kernel_height, kernel_width)
+    out_channels, in_channels, kernel_height, kernel_width = matrix.shape
+    num_col_samples = int(num_row_samples * Q_ratio)
+
+    # Calculate step sizes
+    row_step = max(1, (kernel_height - num_row_samples) // (sampling_ops_per_dim - 1))
+    col_step = max(1, (kernel_width - num_col_samples) // (sampling_ops_per_dim - 1))
+
+    # Calculate number of windows
+    num_row_windows = min(sampling_ops_per_dim, max(1, (kernel_height - num_row_samples) // row_step + 1))
+    num_col_windows = min(sampling_ops_per_dim, max(1, (kernel_width - num_col_samples) // col_step + 1))
+
+    all_eigs = []
+
+    for i in range(num_row_windows):
+        for j in range(num_col_windows):
+            # Extract submatrix
+            row_start = min(i * row_step, kernel_height - num_row_samples)
+            col_start = min(j * col_step, kernel_width - num_col_samples)
+            submatrix = matrix[:, :, row_start:row_start + num_row_samples, col_start:col_start + num_col_samples]
+
+            # Flatten to (out_channels, in_channels * kernel_height * kernel_width)
+            if isconv2d:
+                submatrix = submatrix.flatten(start_dim=1) * math.sqrt(conv_norm)
+            eigs = torch.square(torch.linalg.svdvals(submatrix))
+            all_eigs.append(eigs)
+
+    all_eigs = torch.cat(all_eigs)
+    all_eigs, _ = torch.sort(all_eigs, descending=False)
+
+    return all_eigs
+
+
+
+########################################################################################################
+# This function applies sliding window sampling matrix method for approximating random matrix ESD (V1) #
+########################################################################################################
+def matrix_size_dependent_sampling(matrix, isconv2d, conv_norm, num_row_samples, Q_ratio, step_size=10):
+    rows, cols = matrix.shape
+    num_col_samples = int(num_row_samples * Q_ratio)
+    
+    # Calculate number of windows
+    num_row_windows = max(1, (rows - num_row_samples) // step_size + 1)
+    num_col_windows = max(1, (cols - num_col_samples) // step_size + 1)
+    
+    all_eigs = []
+    # print(f"Matrix shape: ({rows}, {cols}) | Number of sliding operations across rows: {num_row_windows} and across columns: {num_col_windows}")
+    
+    for i in range(0, num_row_windows):
+        for j in range(0, num_col_windows):
+            # Extract submatrix
+            row_start = i * step_size
+            col_start = j * step_size
+            submatrix = matrix[row_start:row_start + num_row_samples, 
+                               col_start:col_start + num_col_samples]
+            if isconv2d:
+                submatrix *= math.sqrt(conv_norm)
+            eigs = torch.square(torch.linalg.svdvals(submatrix))
+            all_eigs.append(eigs)
+
+    all_eigs = torch.cat(all_eigs)
+    all_eigs, _ = torch.sort(all_eigs, descending=False)
+
+    return all_eigs
+
+########################################################################################################
+# This function applies sliding window sampling matrix method for approximating random matrix ESD (V2) #
+########################################################################################################
+def fixed_sampling(matrix, isconv2d, conv_norm, num_row_samples, Q_ratio, sampling_ops_per_dim):
+    rows, cols = matrix.shape
+    num_col_samples = int(num_row_samples * Q_ratio)
+    
+    # Calculate step sizes
+    row_step = max(1, (rows - num_row_samples) // (sampling_ops_per_dim - 1))
+    col_step = max(1, (cols - num_col_samples) // (sampling_ops_per_dim - 1))
+    
+    # Calculate number of windows
+    num_row_windows = min(sampling_ops_per_dim, max(1, (rows - num_row_samples) // row_step + 1))
+    num_col_windows = min(sampling_ops_per_dim, max(1, (cols - num_col_samples) // col_step + 1))
+    
+    all_eigs = []
+    # print(f"Matrix shape: ({rows}, {cols}) | Number of sliding operations across rows: {num_row_windows} and across columns: {num_col_windows}")
+    # print(f"Row step size: {row_step}, Column step size: {col_step}")
+    
+    for i in range(0, num_row_windows):
+        for j in range(0, num_col_windows):
+            # Extract submatrix
+            row_start = min(i * row_step, rows - num_row_samples)
+            col_start = min(j * col_step, cols - num_col_samples)
+            submatrix = matrix[row_start:row_start+num_row_samples, 
+                               col_start:col_start+num_col_samples]
+            if isconv2d:
+                submatrix *= math.sqrt(conv_norm)
+            eigs = torch.square(torch.linalg.svdvals(submatrix))
+            all_eigs.append(eigs)
+    
+    all_eigs = torch.cat(all_eigs)
+    all_eigs, _ = torch.sort(all_eigs, descending=False)
+
+    return all_eigs
+
+
+########################################################################################################
+###################################### Driver Function #################################################
+########################################################################################################
+
+def sampled_eigs(matrix, isconv2d, conv_norm, num_row_samples, Q_ratio, sampling_ops_per_dim, step_size=10):
+    # Using Conv2d weight slicing method from WW
+    # if isconv2d:
+        # matrix = matrix.view(matrix.size(0), -1) # * math.sqrt(conv_norm)
+    # Use the conv2D_Wmats method to slice the Conv2D weight tensor
+    # Wmats, N, M, rf = conv2D_Wmats(matrix, channels=CHANNELS.UNKNOWN)       
+    
+    if sampling_ops_per_dim is None:
+        eigs = matrix_size_dependent_sampling(
+            matrix, isconv2d, conv_norm,
+            num_row_samples=num_row_samples, 
+            Q_ratio=Q_ratio, 
+            step_size=step_size,
+        )
+    else:
+        eigs = fixed_sampling(
+            matrix, isconv2d, conv_norm,
+            num_row_samples=num_row_samples, 
+            Q_ratio=Q_ratio, 
+            sampling_ops_per_dim=sampling_ops_per_dim,
+        )
+    return eigs
