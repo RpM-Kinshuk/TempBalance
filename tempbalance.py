@@ -373,6 +373,8 @@ class Tempbalance(object):
         num_row_samples = self.num_row_samples
         Q_ratio = self.Q_ratio
         step_size = self.step_size
+        xmin_pos = self.xmin_pos
+        filter_zeros = self.filter_zeros
         sampling_ops_per_dim = self.sampling_ops_per_dim
 
         if not use_sliding_window:
@@ -396,57 +398,62 @@ class Tempbalance(object):
     
         device = next(net.parameters()).device  # type: ignore
     
-        for name, m in net.named_modules():  # type: ignore
+        for name, m in net.named_modules(): # type: ignore
             if isinstance(m, nn.Conv2d) or isinstance(m, nn.Linear):
                 matrix = m.weight.data.clone().to(device)
-                matrix = matrix.float()
 
-                # Sliding window option for sampling ESD
-                if use_sliding_window:
-                    if isinstance(m, nn.Conv2d):
-                        # Flatten the Conv2d weight tensor to 2D
-                        matrix = matrix.view(matrix.size(0), -1) * math.sqrt(conv_norm)
-                    if sampling_ops_per_dim is not None:
-                        print(f"Shape of matrix for {name}: {matrix.shape}")
-                        if matrix.dim() != 2:
-                            raise ValueError(f"Expected a 2D matrix, got {matrix.dim()} dimensions for {name}.")
-                        eigs = fixed_number_of_sampling_ops(
-                            matrix, 
-                            num_row_samples=num_row_samples, 
-                            Q_ratio=Q_ratio, 
-                            num_sampling_ops_per_dimension=sampling_ops_per_dim, 
-                        )
+                # Conv2d weight slicing using conv2D_Wmats method from WW
+                if isinstance(m, nn.Conv2d):
+                    # Use the conv2D_Wmats method to slice the Conv2D weight tensor
+                    Wmats, N, M, rf = conv2D_Wmats(matrix, channels=CHANNELS.UNKNOWN)
+                else:  # Linear layers
+                    Wmats = [matrix.float()]
+
+                all_eigs = []
+
+                for W in Wmats:
+                    # Apply sliding window sampling or regular ESD computation
+                    if use_sliding_window:
+                        if sampling_ops_per_dim is not None:
+                            eigs = fixed_number_of_sampling_ops(
+                                W, 
+                                num_row_samples=num_row_samples, 
+                                Q_ratio=Q_ratio, 
+                                num_sampling_ops_per_dimension=sampling_ops_per_dim, 
+                            )
+                        else:
+                            eigs = matrix_size_dependent_number_of_sampling_ops(
+                                W, 
+                                num_row_samples=num_row_samples, 
+                                Q_ratio=Q_ratio, 
+                                step_size=step_size,
+                            )
                     else:
-                        eigs = matrix_size_dependent_number_of_sampling_ops(
-                            matrix, 
-                            num_row_samples=num_row_samples, 
-                            Q_ratio=Q_ratio, 
-                            step_size=step_size,
-                        )
-                else:
-                    if isinstance(m, nn.Conv2d):
-                        matrix = torch.flatten(matrix, start_dim=2) * math.sqrt(conv_norm)
-                        matrix = matrix.transpose(1, 2).transpose(0, 1)
-                    matrix = matrix.float()
-                    # Regular full matrix ESD computation
-                    eigs = torch.square(torch.linalg.svdvals(matrix).flatten())
-                    eigs = torch.sort(eigs).values
-                
-                if not isinstance(eigs, torch.Tensor):
-                    eigs = torch.tensor(eigs, device=device)
-                spectral_norm = eigs[-1].item()
-                fnorm = torch.sum(eigs).item()
-    
-                # Filtering based on EVALS_THRESH
-                nz_eigs = eigs[eigs > EVALS_THRESH] if self.filter_zeros else eigs
+                        # Regular ESD: compute eigenvalues of W
+                        eigs = torch.square(torch.linalg.svdvals(W).flatten())
+
+                    if not isinstance(eigs, torch.Tensor):
+                        eigs = torch.tensor(eigs, device=device)
+
+                    all_eigs.append(eigs)
+
+                # Concatenate and sort all eigenvalues from the slices
+                all_eigs = torch.cat(all_eigs)
+                all_eigs = torch.sort(all_eigs).values
+
+                spectral_norm = all_eigs[-1].item()
+                fnorm = torch.sum(all_eigs).item()
+
+                # Filter based on threshold
+                nz_eigs = all_eigs[all_eigs > EVALS_THRESH] if filter_zeros else all_eigs
                 if len(nz_eigs) == 0:
-                    nz_eigs = eigs
+                    nz_eigs = all_eigs
                 N = len(nz_eigs)
                 log_nz_eigs = torch.log(nz_eigs)
-    
-                # Proceed with alpha and D calculations
+
+                # Alpha and D calculations (from before)
                 if fix_fingers == 'xmin_mid':
-                    i = N // self.xmin_pos
+                    i = N // xmin_pos
                     xmin = nz_eigs[i]
                     n = float(N - i)
                     seq = torch.arange(n, device=device)
@@ -464,7 +471,7 @@ class Tempbalance(object):
                         xmin2 = 10 ** boundaries[ih]
                         xmin_min = torch.log10(0.95 * xmin2)
                         xmin_max = 1.5 * xmin2
-                    
+
                     for i, xmin in enumerate(nz_eigs[:-1]):
                         if fix_fingers == 'xmin_peak':
                             if xmin < xmin_min:
@@ -477,25 +484,25 @@ class Tempbalance(object):
                         alphas[i] = alpha
                         if alpha > 1:
                             Ds[i] = torch.max(torch.abs(1 - (nz_eigs[i:] / xmin) ** (-alpha + 1) - seq / n))
-                    
+
                     min_D_index = torch.argmin(Ds)
                     final_alpha = alphas[min_D_index]
                     final_D = Ds[min_D_index]
-    
-                # Convert to item() for storing results
-                final_alpha = final_alpha.item()
-                final_D = final_D.item()
+
+                # Store results
+                final_alpha = final_alpha.item()  # type: ignore
+                final_D = final_D.item()  # type: ignore
                 final_alphahat = final_alpha * math.log10(spectral_norm)
-    
+
                 results['spectral_norm'].append(spectral_norm)
                 results['alphahat'].append(final_alphahat)
                 results['norm'].append(fnorm)
                 results['alpha'].append(final_alpha)
                 results['D'].append(final_D)
                 results['longname'].append(name)
-                results['eigs'].append(nz_eigs.detach().cpu().numpy())
+                results['eigs'].append(nz_eigs.cpu().numpy())
                 results['eigs_num'].append(len(nz_eigs))
-    
+
         return results
  
     def get_layer_temps(self, assign_func, metric_scores, untuned_lr):
