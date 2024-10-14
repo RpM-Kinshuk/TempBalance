@@ -229,7 +229,35 @@ def fixed_sampling(matrix, isconv2d, conv_norm, num_row_samples, Q_ratio, sampli
 
     return all_eigs
 
+## CONV2D SAMPLING METHOD
+def sample_conv2d(matrix, conv_norm, Q_ratio):
+    Wmats, N, M, rf = conv2D_Wmats(matrix, channels=CHANNELS.UNKNOWN)
+    all_eigs = []
+    for W in Wmats:
+        rows, cols = W.shape
 
+        if Q_ratio > 1:
+            num_row_samples = rows // Q_ratio
+            num_col_samples = rows
+        else:
+            num_row_samples = rows
+            num_col_samples = cols // (1 / Q_ratio)
+
+        # Ensure we don't sample more rows or columns than exist
+        num_row_samples = max(1, int(num_row_samples))
+        num_col_samples = max(1, int(num_col_samples))
+
+        submatrix = W[:num_row_samples, :num_col_samples]
+        submatrix *= math.sqrt(conv_norm)
+
+        eigs = torch.square(torch.linalg.svdvals(submatrix))
+        all_eigs.append(eigs)
+    
+    all_eigs = torch.cat(all_eigs)
+    all_eigs = torch.sort(all_eigs, descending=False).values
+
+    return all_eigs
+        
 ########################################################################################################
 ###################################### Driver Function #################################################
 ########################################################################################################
@@ -240,7 +268,8 @@ def sampled_eigs(matrix, isconv2d, conv_norm, num_row_samples, Q_ratio, sampling
         # matrix = matrix.view(matrix.size(0), -1) # * math.sqrt(conv_norm)
     # Use the conv2D_Wmats method to slice the Conv2D weight tensor
     # Wmats, N, M, rf = conv2D_Wmats(matrix, channels=CHANNELS.UNKNOWN)       
-    
+    if isconv2d:
+        eigs = sample_conv2d(matrix, conv_norm, Q_ratio)
     if sampling_ops_per_dim is None:
         eigs = matrix_size_dependent_sampling(
             matrix, isconv2d, conv_norm,
