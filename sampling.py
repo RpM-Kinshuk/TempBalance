@@ -270,6 +270,8 @@ def sampled_eigs(matrix, isconv2d, conv_norm, num_row_samples, Q_ratio, sampling
     # Wmats, N, M, rf = conv2D_Wmats(matrix, channels=CHANNELS.UNKNOWN)       
     if isconv2d:
         eigs = sample_conv2d(matrix, conv_norm, Q_ratio)
+        return eigs
+        # matrix = matrix.view(matrix.size(0), -1) * math.sqrt(conv_norm)
     if sampling_ops_per_dim is None:
         eigs = matrix_size_dependent_sampling(
             matrix, isconv2d, conv_norm,
