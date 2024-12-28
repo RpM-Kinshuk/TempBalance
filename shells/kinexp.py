@@ -3,23 +3,28 @@ import itertools
 from gputracker.gputracker import get_logger, DispatchThread
 os.environ['MKL_THREADING_LAYER'] = 'gnu'
 
-gpus = list(range(4))
+gpus = list(range(8))
+gpus = [7]
 slide_list = [True, False]
 
-slide_window = False
+seed = 42
+slide_window = True
 row_samples = 100
 q_ratio = 2.0
 step_size = 10
 sampling_ops = 10
-qr_list = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0]
-ops_list = [5, 10, 15, 20, 30, 50]
+
+row_list = [20, 50, 100, 150, 200]
+qr_list = [0.5, 0.75, 1.0, 1.5, 2.0, 2.5]
+ops_list = [5, 10, 15, 20, 30]
+seed_list = [42, 43, 44]
 
 dataset = 'cifar100'
 
-grid = itertools.product(qr_list, ops_list)
+grid = itertools.product(seed_list, row_list, qr_list, ops_list)
 
 if not slide_window:
-    grid = itertools.product([1], [1])
+    grid = itertools.product(seed_list, [1], [1], [1])
 
 model = 'resnet'
 depth = 18
@@ -29,18 +34,22 @@ logger = get_logger('log', 'schedule_subspace.log')
 # Bash command list
 BASH_COMMAND_LIST = []
 
-for q_ratio, sampling_ops in grid:
+for seed, row_samples, q_ratio, sampling_ops in grid:
     
-    save_path = f"/jumbo/yaoqingyang/kinshuk/TempBalance/results/latest/{model}{depth}/{dataset}/slide_{slide_window}"
+    save_path = f"/jumbo/yaoqingyang/kinshuk/TempBalance/results/flatten/{seed}/{model}{depth}/{dataset}/slide_{slide_window}"
     additional = f"/row_{row_samples}/qr_{q_ratio}/ops_{sampling_ops}"
     if slide_window:
         save_path += additional
+    # save_path  = f"/jumbo/yaoqingyang/kinshuk/TempBalance/mew"
     if not os.path.exists(save_path):
         os.makedirs(save_path)
+    training_stats_path = os.path.join(save_path, 'training_stats.npy')
+    if os.path.exists(training_stats_path):
+        continue
     cmd = (
         "OMP_NUM_THREADS=1 python /jumbo/yaoqingyang/kinshuk/TempBalance/main_tb.py"
         f" --ckpt-path {save_path}"
-        f" --seed 42"
+        f" --seed {seed}"
         f" --net-type {model}"
         f" --dataset {dataset}"
         f" --lr 0.1"
@@ -67,7 +76,7 @@ dispatch_thread = DispatchThread(
     "TempBalance training",
     BASH_COMMAND_LIST,
     logger,
-    gpu_m_th=500,
+    gpu_m_th=30000,
     gpu_list=gpus,
     maxcheck=0,
     num_gpus_needed=1,

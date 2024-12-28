@@ -5,6 +5,7 @@ import time
 import argparse
 import random
 import torch
+import pandas as pd
 import torch.nn as nn
 import torch.backends.cudnn as cudnn
 import numpy as np
@@ -309,6 +310,13 @@ if args.lr_sche == 'cosine':
 else:
     raise NotImplementedError
 
+esd_est = tb_scheduler.net_esd_estimator()
+esd_est = pd.DataFrame(esd_est)
+sv_path = os.path.join(args.ckpt_path, "esd_est", f"epoch_0_esd.csv")
+if not os.path.exists(os.path.dirname(sv_path)):
+    os.makedirs(os.path.dirname(sv_path))
+esd_est.to_csv(sv_path, index=True)
+
 print('\n[Phase 3] : Training model')
 print('| Training Epochs = ' + str(args.num_epochs))
 print('| Initial Learning Rate = ' + str(args.lr))
@@ -355,7 +363,7 @@ for epoch in range(start_epoch, start_epoch+args.num_epochs):
             'train_loss':train_loss,
             'epoch':epoch
         }
-        torch.save(state, join(args.ckpt_path, f'epoch_{epoch}.ckpt'))
+        # torch.save(state, join(args.ckpt_path, f'epoch_{epoch}.ckpt'))
     
     # save best
     if test_acc > best_acc:
@@ -372,7 +380,7 @@ for epoch in range(start_epoch, start_epoch+args.num_epochs):
         }
         best_acc = test_acc
         is_current_best=True
-        torch.save(state, join(args.ckpt_path, f'epoch_best.ckpt'))
+        # torch.save(state, join(args.ckpt_path, f'epoch_best.ckpt'))
     else:
         is_current_best=False
     
@@ -405,6 +413,13 @@ for epoch in range(start_epoch, start_epoch+args.num_epochs):
     training_stats['elapsed_time'].append(elapsed_time)
     
     np.save(join(args.ckpt_path, "training_stats.npy"), training_stats)
+
+    esd_est = tb_scheduler.net_esd_estimator()
+    esd_est = pd.DataFrame(esd_est)
+    sv_path = os.path.join(args.ckpt_path, "esd_est", f"epoch_{epoch}_esd.csv")
+    if not os.path.exists(os.path.dirname(sv_path)):
+        os.makedirs(os.path.dirname(sv_path))
+    esd_est.to_csv(sv_path, index=True)
     
     
 if args.print_tofile:
